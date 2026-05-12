@@ -1,0 +1,3 @@
+git pull - скачать изменения из репозитория (GitHub)
+pip install -r requirement.txt - установить все зависимости (библиотеки) из файлика requirement.txt
+streamlit run app.py - запустить окно в браузере нашего сайта
