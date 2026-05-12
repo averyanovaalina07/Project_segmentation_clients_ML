@@ -15,7 +15,10 @@ st.markdown("Передвигайте слайдер слева, чтобы из
 # --- Функция загрузки данных с кэшированием (чтобы не ждать по 2 минуты) ---
 @st.cache_data
 def load_and_clean_data():
-    # Используем твой путь к файлу
+    """
+    Загрузка данных, очистка от пустых значений и расчет RFM-метрик.
+    """
+    # Загружаем файл
     df = pd.read_excel('data/Online_Retail.xlsx')
     df = df.dropna(subset=['CustomerID'])
     df = df[df['Quantity'] > 0]
