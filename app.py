@@ -7,12 +7,13 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 
+# Настройка страницы: задаем заголовок вкладки и широкий формат отображения
 st.set_page_config(page_title="Анализ сегментации клиентов", layout="wide")
 
 st.title("📊 Интерактивная сегментация клиентов (RFM + PCA)")
 st.markdown("Передвигайте слайдер слева, чтобы изменить количество групп клиентов.")
 
-# --- Функция загрузки данных с кэшированием (чтобы не ждать по 2 минуты) ---
+# --- Функция загрузки данных с кэшированием (чтобы не ждать загрузку при каждом изменении слайдера) ---
 @st.cache_data
 def load_and_clean_data():
     """
@@ -20,26 +21,39 @@ def load_and_clean_data():
     """
     # Загружаем файл
     df = pd.read_excel('data/Online_Retail.xlsx')
+    
+    # Удаляем строки без ID клиента
     df = df.dropna(subset=['CustomerID'])
+    
+    # Убираем возвраты товаров (отрицательное количество)
     df = df[df['Quantity'] > 0]
+    
+    # Считаем общую сумму покупки для каждой строки
     df['TotalSum'] = df['Quantity'] * df['UnitPrice']
     df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'])
 
+    # Определяем точку отсчета для параметра Recency (самая свежая дата в данных + 1 день)
     snapshot_date = df['InvoiceDate'].max() + pd.Timedelta(days=1)
+    
+    # Группируем данные по клиентам и считаем RFM-метрики + дополнительные признаки
     customers = df.groupby('CustomerID').agg({
-        'InvoiceDate': lambda x: (snapshot_date - x.max()).days,
-        'InvoiceNo': 'nunique',
-        'TotalSum': 'sum',
-        'StockCode': 'nunique'
+        'InvoiceDate': lambda x: (snapshot_date - x.max()).days, # Recency: сколько дней назад была последняя покупка
+        'InvoiceNo': 'nunique',                                 # Frequency: сколько всего было заказов
+        'TotalSum': 'sum',                                      # Monetary: сколько всего денег потратил
+        'StockCode': 'nunique'                                  # Variety: сколько уникальных товаров купил
     }).rename(columns={'InvoiceDate': 'Recency', 'InvoiceNo': 'Frequency', 'TotalSum': 'Monetary', 'StockCode': 'Variety'})
 
+    # Считаем средний чек клиента
     customers['AvgOrderValue'] = customers['Monetary'] / customers['Frequency']
     return customers
 
 
 @st.cache_data
 def compute_elbow(X: np.ndarray, k_min: int = 2, k_max: int = 10) -> tuple[list, list]:
-    """Run KMeans for k = k_min..k_max and return (K_range, inertias) for the elbow chart."""
+    """
+    Запуск KMeans для k от k_min до k_max. 
+    Возвращает диапазон K и значения инерции для построения графика «метода локтя».
+    """
     k_range = list(range(k_min, k_max + 1))
     inertias = []
     for k in k_range:
@@ -50,10 +64,10 @@ def compute_elbow(X: np.ndarray, k_min: int = 2, k_max: int = 10) -> tuple[list,
 
 
 def explode_clusters(coords: np.ndarray, labels: np.ndarray, separation: float = 1.0) -> np.ndarray:
-    """Cosmetic post-processing that visually pushes clusters apart on the 2D canvas.
-
-    Each point is translated along the vector (global_center → cluster_center) by
-    `separation` factor. Does NOT change clustering or any metric — only the picture.
+    """
+    Косметическая обработка: визуально раздвигает кластеры на 2D графике.
+    Каждая точка смещается вдоль вектора (общий центр → центр кластера) на коэффициент `separation`.
+    НЕ меняет результаты кластеризации или метрики — влияет только на картинку.
     """
     coords = np.asarray(coords, dtype=float)
     if abs(separation - 1.0) < 1e-9:
@@ -69,11 +83,12 @@ def explode_clusters(coords: np.ndarray, labels: np.ndarray, separation: float =
         cluster_center = coords[mask].mean(axis=0)
         direction = cluster_center - global_center
         norm = float(np.linalg.norm(direction))
+        
         if norm < 1e-6:
-            # Degenerate (cluster center coincides with global center):
-            # fall back to a deterministic direction on a unit circle.
+            # Если центр кластера совпадает с общим центром, используем круговое распределение
             angle = 2 * np.pi * i / n_clusters
             direction = np.array([np.cos(angle), np.sin(angle)])
+            
         new_center = global_center + direction * separation
         offsets = coords[mask] - cluster_center
         out[mask] = new_center + offsets
@@ -81,13 +96,16 @@ def explode_clusters(coords: np.ndarray, labels: np.ndarray, separation: float =
     return out
 
 
-# Загружаем данные
+# Загружаем данные с индикатором ожидания (spinner)
 with st.spinner('Загрузка огромного файла Excel... Пожалуйста, подождите.'):
     customers = load_and_clean_data()
 
 # --- Боковая панель (Sidebar) ---
 st.sidebar.header("Настройки модели")
+# Слайдер для выбора количества кластеров
 k_clusters = st.sidebar.slider("Количество кластеров (k)", min_value=2, max_value=10, value=5)
+
+# Дополнительная настройка для визуального разделения групп
 separation = st.sidebar.slider(
     "Раздвинуть кластеры (визуально)",
     min_value=1.0, max_value=5.0, value=1.0, step=0.25,
@@ -97,23 +115,26 @@ separation = st.sidebar.slider(
     ),
 )
 
-# --- Обработка данных ---
 features = ['Recency', 'Frequency', 'Monetary', 'Variety', 'AvgOrderValue']
+
+# Логарифмируем данные, чтобы убрать выбросы
 X_log = np.log1p(customers[features])
+
+# Стандартизируем данные, чтобы все признаки имели одинаковый вес
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X_log)
 
-# PCA
+# Применяем PCA (Метод главных компонент) для сжатия 5 признаков до 2 компонент для отрисовки графика
 pca = PCA(n_components=2)
 pca_results = pca.fit_transform(X_scaled)
 customers['PCA1'] = pca_results[:, 0]
 customers['PCA2'] = pca_results[:, 1]
 
-# KMeans с динамическим k
+# Обучаем модель KMeans с количеством кластеров, выбранным пользователем
 kmeans = KMeans(n_clusters=k_clusters, init='k-means++', random_state=42)
 customers['Segment'] = kmeans.fit_predict(X_scaled)
 
-# Cosmetic: visually push clusters apart on the canvas (does not affect clustering).
+# Применяем косметическое "раздвигание" кластеров на холсте
 exploded = explode_clusters(
     customers[['PCA1', 'PCA2']].to_numpy(),
     customers['Segment'].to_numpy(),
@@ -122,7 +143,7 @@ exploded = explode_clusters(
 customers['PCA1'] = exploded[:, 0]
 customers['PCA2'] = exploded[:, 1]
 
-# --- Главная визуализация ---
+# --- Главная визуализация (График PCA) ---
 title = f"Визуализация для {k_clusters} сегментов"
 if separation > 1.0 + 1e-9:
     title += f" — раздвинуто ×{separation:g}"
@@ -141,7 +162,7 @@ if separation > 1.0 + 1e-9:
         "Расстояния на картинке больше не отражают реальное расстояние между клиентами."
     )
 
-# --- Статистика по сегментам (под графиком) ---
+# --- Статистика по сегментам (Сводная таблица под графиком) ---
 st.subheader("Статистика по сегментам")
 stats = customers.groupby('Segment').agg(
     Recency=('Recency', 'mean'),
@@ -151,6 +172,7 @@ stats = customers.groupby('Segment').agg(
     AvgOrderValue=('AvgOrderValue', 'mean'),
     Покупателей=('Recency', 'size'),
 )
+# Красивое форматирование чисел в таблице
 st.dataframe(
     stats.style.format({
         'Recency': '{:.0f}',
@@ -168,7 +190,7 @@ st.info(
     "Variety (разных товаров), AvgOrderValue (средний чек), плюс размер сегмента."
 )
 
-# --- Bar chart: размер сегментов ---
+# --- Столбчатая диаграмма: размер сегментов ---
 st.subheader("Размер сегментов")
 sizes = customers['Segment'].value_counts().sort_index()
 bar_colors = [
@@ -181,12 +203,13 @@ sizes.plot(kind='bar', ax=ax_bar, color=bar_colors[:len(sizes)])
 ax_bar.set_xlabel('Сегмент')
 ax_bar.set_ylabel('Покупателей')
 ax_bar.tick_params(axis='x', rotation=0)
+# Добавляем подписи количества над столбцами
 for i, v in enumerate(sizes):
     ax_bar.text(i, v + max(sizes) * 0.02, str(v), ha='center', fontweight='bold')
 fig_bar.tight_layout()
 st.pyplot(fig_bar)
 
-# --- Метод локтя ---
+# --- Раздел «Метод локтя» ---
 st.subheader("Метод локтя — подбор количества кластеров")
 st.write(
     "Ищем точку, где кривая резко перестаёт падать (характерный «излом») — "
@@ -208,7 +231,7 @@ ax_elbow.grid(True, alpha=0.3)
 fig_elbow.tight_layout()
 st.pyplot(fig_elbow)
 
-# --- Поиск клиента ---
+# --- Поиск конкретного клиента по ID ---
 st.divider()
 st.subheader("🔍 Проверить конкретного клиента")
 search_id = st.text_input("Введите CustomerID (например, 12346.0):")
@@ -221,6 +244,7 @@ if search_id:
     except:
         st.error("Клиент с таким ID не найден.")
 
-# --- Таблица всех данных ---
+# --- Разворачиваемая таблица со всеми результатами ---
 with st.expander("Посмотреть всю таблицу результатов"):
     st.write(customers)
+    
